@@ -10,17 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Fetch subscription
-        run: curl -fsSL "${{ secrets.SUB_URL }}" -o sub.yaml
-
-      - name: Merge custom rules
-        run: |
-          python3 -m pip install -q pyyaml
-          python3 merge.py
-
-      - name: Update secret gist (skip if unchanged)
+      - uses: astral-sh/setup-uv@v5
+      - name: Sync
         env:
+          SUB_URL: ${{ secrets.SUB_URL }}
           GIST_ID: ${{ secrets.GIST_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
-        run: python3 update_gist.py
+        run: uv run sync.py
