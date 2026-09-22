@@ -1,0 +1,5 @@
+- DOMAIN-SUFFIX,chatgpt.com,AI专用
+- DOMAIN-SUFFIX,openai.com,AI专用
+- DOMAIN-SUFFIX,claude.ai,AI专用
+- DOMAIN-SUFFIX,aistudio.google.com,AI专用
+- DOMAIN-SUFFIX,ai.google.dev,AI专用
