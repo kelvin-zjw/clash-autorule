@@ -19,24 +19,8 @@ jobs:
           python3 -m pip install -q pyyaml
           python3 merge.py
 
-      - name: Update secret gist
+      - name: Update secret gist (skip if unchanged)
         env:
           GIST_ID: ${{ secrets.GIST_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
-        run: |
-          python3 - <<'EOF'
-          import json, os, urllib.request
-          body = json.dumps({
-              "files": {"config.yaml": {"content": open("config.yaml", encoding="utf-8").read()}}
-          }).encode()
-          req = urllib.request.Request(
-              f"https://api.github.com/gists/{os.environ['GIST_ID']}",
-              data=body,
-              method="PATCH",
-              headers={
-                  "Authorization": f"token {os.environ['GIST_TOKEN']}",
-                  "Accept": "application/vnd.github+json",
-              },
-          )
-          urllib.request.urlopen(req)
-          EOF
+        run: python3 update_gist.py
