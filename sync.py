@@ -38,10 +38,9 @@ sub["rules"] = custom + sub.get("rules", [])
 
 for g in sub["proxy-groups"]:
     if g.get("name") == "Ghelper":
-        g["type"] = "url-test"
+        g["type"] = "fallback"
         g["url"] = "http://www.gstatic.com/generate_204"
         g["interval"] = 300
-        g["tolerance"] = 50
         g["include-all"] = True
         g["proxies"] = ["DIRECT", "🌐 全球智能", "AI专用"]
 
