@@ -12,6 +12,9 @@ SUB_URL = os.environ["SUB_URL"]
 GIST_ID = os.environ["GIST_ID"]
 GIST_TOKEN = os.environ["GIST_TOKEN"]
 
+# 是否注入 TUN 配置（mihomo 原生客户端可直接接管流量；Clash Verge 会用自己的开关覆盖，无副作用）
+ENABLE_TUN = os.environ.get("ENABLE_TUN", "1") == "1"
+
 HTTPS_TEST = "https://www.gstatic.com/generate_204"
 
 
@@ -56,6 +59,20 @@ for g in sub.get("proxy-groups", []):
 sub["ipv6"] = False
 dns = sub.setdefault("dns", {})
 dns["ipv6"] = False
+
+# 5. TUN 接管（能做多少做多少）
+if ENABLE_TUN:
+    tun = sub.setdefault("tun", {})
+    tun.setdefault("enable", True)
+    tun.setdefault("stack", "gvisor")
+    tun.setdefault("auto-route", True)
+    tun.setdefault("auto-detect-interface", True)
+    tun.setdefault("strict-route", False)
+    # TUN 下需要劫持 DNS 到内核，才能让 fake-ip 域名规则生效
+    dns.setdefault("enable", True)
+    dns.setdefault("enhanced-mode", "fake-ip")
+    if not tun.get("dns-hijack"):
+        tun["dns-hijack"] = ["any:53"]
 
 new = yaml.safe_dump(
     sub, allow_unicode=True, sort_keys=False, default_flow_style=False, width=4096
