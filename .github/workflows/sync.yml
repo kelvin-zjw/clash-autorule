@@ -1,6 +1,12 @@
 name: sync
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**.py"
+      - "**.txt"
   schedule:
     - cron: "0 */6 * * *"
   workflow_dispatch:
