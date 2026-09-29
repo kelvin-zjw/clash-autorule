@@ -8,3 +8,4 @@
 - DOMAIN-SUFFIX,anthropic.com,AI专用
 - DOMAIN-SUFFIX,aistudio.google.com,AI专用
 - DOMAIN-SUFFIX,ai.google.dev,AI专用
+- DOMAIN-SUFFIX,googleapis.com,AI专用
