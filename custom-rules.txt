@@ -5,6 +5,8 @@
 - DOMAIN-SUFFIX,auth0.com,AI专用
 - DOMAIN-SUFFIX,chatgpt-async-webps-prod-southcentralus-6.webpubsub.azure.com,AI专用
 - DOMAIN-SUFFIX,claude.ai,AI专用
+- DOMAIN-SUFFIX,claude.com,AI专用
+- DOMAIN-SUFFIX,claudeusercontent.com,AI专用
 - DOMAIN-SUFFIX,anthropic.com,AI专用
 - DOMAIN-SUFFIX,aistudio.google.com,AI专用
 - DOMAIN-SUFFIX,ai.google.dev,AI专用
