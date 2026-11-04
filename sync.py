@@ -13,17 +13,41 @@ import yaml
 # 是否注入 TUN 配置（mihomo 原生客户端可直接接管流量；Clash Verge 会用自己的开关覆盖，无副作用）
 ENABLE_TUN = os.environ.get("ENABLE_TUN", "1") == "1"
 
+# DRY_RUN=1 只把生成的配置打到 stdout，不读写 gist（改封禁列表时用来先看结果）
+DRY_RUN = os.environ.get("DRY_RUN") == "1"
+
 HTTPS_TEST = "https://www.gstatic.com/generate_204"
 
 AI_GROUP = "AI专用"
 
-# 出口被 Gemini API 判为「不支持的地区」的节点（实测返回 400 User location is not supported
-# for the API use）。这些节点跑普通上网没问题，所以保留在 proxies 里，但必须从 AI专用 组剔除：
-# 否则 url-test 会因为它们延迟低而选中，所有 AI 请求都会被 Google 拒掉。
+# 出口被 Gemini API 判为「不支持的地区」的节点（实测返回 400 FAILED_PRECONDITION
+# "User location is not supported for the API use"）。这些节点跑普通上网没问题，所以保留在
+# proxies 里，但必须从 AI专用 组剔除：url-test 只看 gstatic 延迟，一旦选中它们（往往延迟最低），
+# 所有 AI 请求都会被 Google 拒掉，而且会随延迟抖动在「好节点/坏节点」之间来回切，表现为时好时坏。
+#
+# 实测数据（2026-11-03，逐个节点用 Gemini /v1beta/models 探活）：
+#   日本 / 日本[CM]       154.55.127.82   AS18186 Nebula Global     400
+#   新加坡 / 新加坡[CM]    154.39.62.242   AS18186 Nebula Global     400
+#   美国硅谷3             198.2.206.82    AS54600 PEG TECH          400
+# 对照组都 200：新加坡3（Akamai）、硅谷/2/4/5/7（PEG TECH）、洛杉矶/圣何塞（Sharktech）、
+# 英国、法国、德国、印尼、韩国、美国ISP。所以不是「机房一律封」，是这些落地 IP 进了 Google 的灰名单。
+#
+# 名字和 server 后缀各挡一层：机场每天轮换会改节点名和随机前缀（美国硅谷4 -> 美国硅谷7），
+# 但落地机房域名后缀（jp / sg2 / u12）是稳定的，改名之后仍然挡得住。
 AI_BLOCKED_NODES = (
-    "🇸🇬 新加坡",  # 出口 154.39.62.242 / 2602:f7f0::/32（AS18186 Nebula Global）
-    "美国硅谷3",  # 出口 198.2.206.82（AS54600 PEG TECH）
-    "美国硅谷6",  # 出口 142.0.141.137（AS54600 PEG TECH）
+    "🇯🇵 日本",  # 154.55.127.82（AS18186 Nebula Global）
+    "🇯🇵 日本[CM]",  # 同上，jp2 落地，同一出口
+    "🇸🇬 新加坡",  # 154.39.62.242（AS18186 Nebula Global）
+    "🇸🇬 新加坡[CM]",  # 同上，sg2 落地，同一出口
+    "美国硅谷3",  # 198.2.206.82（AS54600 PEG TECH）
+    "美国硅谷6",  # 142.0.141.137（AS54600 PEG TECH）
+)
+AI_BLOCKED_SERVERS = (
+    r"\.jp\.oshuawei\.com$",
+    r"\.jp2\.oshuawei\.com$",
+    r"\.sg\.oshuawei\.com$",
+    r"\.sg2\.oshuawei\.com$",
+    r"\.u12\.oshuawei\.com$",
 )
 
 
@@ -45,21 +69,38 @@ def api(path, token, method="GET", data=None):
     return json.loads(urllib.request.urlopen(req).read())
 
 
+def warn(message):
+    """GitHub Actions 会把这个渲染成一条 annotation，方便在 run 页面直接看到。"""
+    print(f"::warning::{message}", file=sys.stderr)
+
+
+def _blocked_by_server(proxy):
+    server = proxy.get("server") or ""
+    return any(re.search(pattern, server) for pattern in AI_BLOCKED_SERVERS)
+
+
 def drop_ai_blocked_nodes(sub):
-    """把 AI_BLOCKED_NODES 从 AI专用 组剔除，返回 (已排除, 没找到的)。"""
+    """把被封节点从 AI专用 组剔除，返回 (已排除, 订阅里已不存在的封禁条目)。"""
+    proxies = {p.get("name"): p for p in sub.get("proxies", []) if isinstance(p, dict)}
     for group in sub.get("proxy-groups", []):
         if group.get("name") != AI_GROUP:
             continue
-        # include-all 的组要靠 exclude-filter 才能挡掉节点
+        # include-all 的组只能靠 exclude-filter 按「节点名」挡，server 规则在这里用不上
         if group.get("include-all"):
             pattern = "|".join(re.escape(n) for n in AI_BLOCKED_NODES)
             existing = group.get("exclude-filter")
             group["exclude-filter"] = f"(?:{existing})|(?:{pattern})" if existing else pattern
             return list(AI_BLOCKED_NODES), []
-        members = group.get("proxies") or []
-        removed = [n for n in AI_BLOCKED_NODES if n in members]
-        group["proxies"] = [n for n in members if n not in AI_BLOCKED_NODES]
-        return removed, [n for n in AI_BLOCKED_NODES if n not in removed]
+        kept, removed = [], []
+        for name in group.get("proxies") or []:
+            if name in AI_BLOCKED_NODES or _blocked_by_server(proxies.get(name, {})):
+                removed.append(name)
+            else:
+                kept.append(name)
+        if not kept:
+            raise RuntimeError(f"剔除后「{AI_GROUP}」没有剩余节点，检查 AI_BLOCKED_* 配置")
+        group["proxies"] = kept
+        return removed, [n for n in AI_BLOCKED_NODES if n not in proxies]
     raise RuntimeError(f"proxy-groups 里找不到「{AI_GROUP}」，无法排除被封节点")
 
 
@@ -84,10 +125,9 @@ def build(sub, custom):
     removed, missing = drop_ai_blocked_nodes(sub)
     print(f"{AI_GROUP}: 排除 {removed or '无'}")
     if missing:
-        print(
-            f"警告：{AI_GROUP} 组里没有 {missing}，订阅可能已改名，请更新 AI_BLOCKED_NODES",
-            file=sys.stderr,
-        )
+        warn(f"订阅里已经没有 {missing}，节点可能改名了，请更新 AI_BLOCKED_NODES/AI_BLOCKED_SERVERS")
+    if not removed:
+        warn("一个已知被封的节点都没排除，AI专用 组可能已经整组不可用（订阅改名了？）")
 
     # 4. 强制关闭 IPv6（本机无 IPv6 出口，fake-ip 返回 AAAA 会 no route to host）
     sub["ipv6"] = False
@@ -108,24 +148,29 @@ def build(sub, custom):
         if not tun.get("dns-hijack"):
             tun["dns-hijack"] = ["any:53"]
 
-    return sub
+    return sub, removed
 
 
 def main():
     sub_url = os.environ["SUB_URL"]
-    gist_id = os.environ["GIST_ID"]
-    gist_token = os.environ["GIST_TOKEN"]
-
     sub = yaml.safe_load(get(sub_url))
     custom = yaml.safe_load(open("custom-rules.txt", encoding="utf-8").read())
 
+    config, removed = build(sub, custom)
     new = yaml.safe_dump(
-        build(sub, custom),
+        config,
         allow_unicode=True,
         sort_keys=False,
         default_flow_style=False,
         width=4096,
     )
+
+    if DRY_RUN:
+        print(new)
+        return 0
+
+    gist_id = os.environ["GIST_ID"]
+    gist_token = os.environ["GIST_TOKEN"]
 
     old = api(f"/gists/{gist_id}", gist_token)["files"].get("config.yaml", {}).get("content", "")
 
@@ -140,6 +185,16 @@ def main():
         )
         print("gist updated")
 
+    # 封禁列表整体失配说明订阅改过名，此时新配置里的 AI专用 可能又会选到被封节点。
+    # 配置已经同步出去了，但仍然要让 CI 红掉，否则会像上次一样悄悄坏掉。
+    if not removed:
+        print(
+            "::error::AI专用 一个已知被封的节点都没排除，请更新 AI_BLOCKED_NODES/AI_BLOCKED_SERVERS 后重跑",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
