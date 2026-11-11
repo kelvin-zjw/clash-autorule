@@ -20,6 +20,19 @@ HTTPS_TEST = "https://www.gstatic.com/generate_204"
 
 AI_GROUP = "AI专用"
 
+# AI专用 组的选点节奏：默认一周才按最低延迟重排一次，其余时间粘住当前节点。
+#
+# mihomo 的 url-test 有两个独立机制，不要混为一谈：
+#   1) 定时重排：每 interval 秒把所有节点测一遍，按最低延迟重选（tolerance 是「必须快多少
+#      才值得换」的容差，这里设 0，即重排就一定选最快）。
+#   2) 失效切换：拨号失败会走 onDialFailed，连续失败达到 max-failed-times 次就立刻触发一次
+#      健康检查并重选，不用等下一个 interval。所以 interval 拉长不会把「节点挂了也不切」带进来。
+# timeout 同时是健康检查超时和失败计数的时间窗口（默认 5000ms）：两次失败间隔超过窗口就重新
+# 计数。留 10s 窗口 + 2 次阈值，静默丢包（超时型）的节点也能在下一次连接时被换掉。
+AI_INTERVAL = 7 * 24 * 3600  # 604800s，一周
+AI_TIMEOUT = 10000  # ms
+AI_MAX_FAILED_TIMES = 2
+
 # 出口被 Gemini API 判为「不支持的地区」的节点（实测返回 400 FAILED_PRECONDITION
 # "User location is not supported for the API use"）。这些节点跑普通上网没问题，所以保留在
 # proxies 里，但必须从 AI专用 组剔除：url-test 只看 gstatic 延迟，一旦选中它们（往往延迟最低），
@@ -104,6 +117,29 @@ def drop_ai_blocked_nodes(sub):
     raise RuntimeError(f"proxy-groups 里找不到「{AI_GROUP}」，无法排除被封节点")
 
 
+def tune_ai_group(sub):
+    """把 AI专用 改成「一周重排一次、平时粘住，节点失效才立刻切」。
+
+    这里不改 type：订阅侧给的 url-test 正好就是「选最低延迟」，换成 fallback 就变成
+    「按列表顺序选第一个可用的」，不再是延迟最优，所以只调参数。
+    """
+    for group in sub.get("proxy-groups", []):
+        if group.get("name") != AI_GROUP:
+            continue
+        if group.get("type") != "url-test":
+            raise RuntimeError(
+                f"「{AI_GROUP}」预期是 url-test，实际是 {group.get('type')}，"
+                "定时重排策略不适用，请先确认订阅是否改过组类型"
+            )
+        group["interval"] = AI_INTERVAL
+        group["timeout"] = AI_TIMEOUT
+        group["max-failed-times"] = AI_MAX_FAILED_TIMES
+        # 容差留 0：一周才重排一次，就是要选当下最快的那个，没必要再要求「快 X ms 才换」
+        group.pop("tolerance", None)
+        return group
+    raise RuntimeError(f"proxy-groups 里找不到「{AI_GROUP}」，无法设置选点节奏")
+
+
 def build(sub, custom):
     sub["rules"] = custom + sub.get("rules", [])
 
@@ -123,11 +159,18 @@ def build(sub, custom):
 
     # 6. AI专用 组剔除被 Google 判为不支持地区的节点
     removed, missing = drop_ai_blocked_nodes(sub)
-    print(f"{AI_GROUP}: 排除 {removed or '无'}")
+    print(f"{AI_GROUP}: 排除 {removed or '无'}", file=sys.stderr)
     if missing:
         warn(f"订阅里已经没有 {missing}，节点可能改名了，请更新 AI_BLOCKED_NODES/AI_BLOCKED_SERVERS")
     if not removed:
         warn("一个已知被封的节点都没排除，AI专用 组可能已经整组不可用（订阅改名了？）")
+
+    # 7. AI专用 组的选点节奏：一周重排一次，节点失效时靠拨号失败兜底切换
+    tune_ai_group(sub)
+    print(
+        f"{AI_GROUP}: interval={AI_INTERVAL}s timeout={AI_TIMEOUT}ms max-failed-times={AI_MAX_FAILED_TIMES}",
+        file=sys.stderr,
+    )
 
     # 4. 强制关闭 IPv6（本机无 IPv6 出口，fake-ip 返回 AAAA 会 no route to host）
     sub["ipv6"] = False
