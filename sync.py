@@ -82,28 +82,24 @@ def api(path, token, method="GET", data=None):
     return json.loads(urllib.request.urlopen(req).read())
 
 
-def warn(message):
-    """GitHub Actions 会把这个渲染成一条 annotation，方便在 run 页面直接看到。"""
-    print(f"::warning::{message}", file=sys.stderr)
-
-
 def _blocked_by_server(proxy):
     server = proxy.get("server") or ""
     return any(re.search(pattern, server) for pattern in AI_BLOCKED_SERVERS)
 
 
 def drop_ai_blocked_nodes(sub):
-    """把被封节点从 AI专用 组剔除，返回 (已排除, 订阅里已不存在的封禁条目)。"""
+    """把被封节点从 AI专用 组剔除，返回实际剔除的节点名。"""
     proxies = {p.get("name"): p for p in sub.get("proxies", []) if isinstance(p, dict)}
     for group in sub.get("proxy-groups", []):
         if group.get("name") != AI_GROUP:
             continue
-        # include-all 的组只能靠 exclude-filter 按「节点名」挡，server 规则在这里用不上
+        # include-all 的组只能靠 exclude-filter 按「节点名」挡，server 规则在这里用不上，
+        # 改名之后的兜底交给 check_ai_group_clean()
         if group.get("include-all"):
             pattern = "|".join(re.escape(n) for n in AI_BLOCKED_NODES)
             existing = group.get("exclude-filter")
             group["exclude-filter"] = f"(?:{existing})|(?:{pattern})" if existing else pattern
-            return list(AI_BLOCKED_NODES), []
+            return []
         kept, removed = [], []
         for name in group.get("proxies") or []:
             if name in AI_BLOCKED_NODES or _blocked_by_server(proxies.get(name, {})):
@@ -113,8 +109,38 @@ def drop_ai_blocked_nodes(sub):
         if not kept:
             raise RuntimeError(f"剔除后「{AI_GROUP}」没有剩余节点，检查 AI_BLOCKED_* 配置")
         group["proxies"] = kept
-        return removed, [n for n in AI_BLOCKED_NODES if n not in proxies]
+        return removed
     raise RuntimeError(f"proxy-groups 里找不到「{AI_GROUP}」，无法排除被封节点")
+
+
+def check_ai_group_clean(sub):
+    """查 AI专用 组里还会不会出现落地命中封禁列表的节点，返回漏网的节点名。
+
+    这是「订阅已经干净」和「机场改名导致名字过滤失效」这两种情况的唯一可靠区分：
+    组里没有可疑节点 → 干净（空列表）；还有 server 后缀命中的节点 → 名字没挡住，要报错。
+    按 server 判断而不是按名字，是因为机场改名只改名字，落地机房域名后缀是稳定的。
+    """
+    proxies = {p.get("name"): p for p in sub.get("proxies", []) if isinstance(p, dict)}
+    for group in sub.get("proxy-groups", []):
+        if group.get("name") != AI_GROUP:
+            continue
+        if group.get("include-all"):
+            pattern = group.get("exclude-filter") or ""
+            try:
+                excluded = re.compile(pattern).search if pattern else None
+            except re.error as exc:
+                raise RuntimeError(f"「{AI_GROUP}」的 exclude-filter 无法编译：{exc}")
+            return [
+                name
+                for name, proxy in proxies.items()
+                if _blocked_by_server(proxy) and not (excluded and excluded(name))
+            ]
+        return [
+            name
+            for name in group.get("proxies") or []
+            if name in AI_BLOCKED_NODES or _blocked_by_server(proxies.get(name, {}))
+        ]
+    raise RuntimeError(f"proxy-groups 里找不到「{AI_GROUP}」，无法检查是否清洗干净")
 
 
 def tune_ai_group(sub):
@@ -158,14 +184,14 @@ def build(sub, custom):
             g["proxies"] = ["DIRECT", "🌐 全球智能", "AI专用"]
 
     # 6. AI专用 组剔除被 Google 判为不支持地区的节点
-    removed, missing = drop_ai_blocked_nodes(sub)
+    removed = drop_ai_blocked_nodes(sub)
     print(f"{AI_GROUP}: 排除 {removed or '无'}", file=sys.stderr)
-    if missing:
-        warn(f"订阅里已经没有 {missing}，节点可能改名了，请更新 AI_BLOCKED_NODES/AI_BLOCKED_SERVERS")
-    if not removed:
-        warn("一个已知被封的节点都没排除，AI专用 组可能已经整组不可用（订阅改名了？）")
 
-    # 7. AI专用 组的选点节奏：一周重排一次，节点失效时靠拨号失败兜底切换
+    # 7. 兜底自检：机场改节点名之后，名字过滤失效，只能靠落地域名后缀识别
+    leaked = check_ai_group_clean(sub)
+    print(f"{AI_GROUP}: 残留命中封禁列表的节点 {leaked or '无'}", file=sys.stderr)
+
+    # 8. AI专用 组的选点节奏：一周重排一次，节点失效时靠拨号失败兜底切换
     tune_ai_group(sub)
     print(
         f"{AI_GROUP}: interval={AI_INTERVAL}s timeout={AI_TIMEOUT}ms max-failed-times={AI_MAX_FAILED_TIMES}",
@@ -191,7 +217,7 @@ def build(sub, custom):
         if not tun.get("dns-hijack"):
             tun["dns-hijack"] = ["any:53"]
 
-    return sub, removed
+    return sub, leaked
 
 
 def main():
@@ -199,7 +225,7 @@ def main():
     sub = yaml.safe_load(get(sub_url))
     custom = yaml.safe_load(open("custom-rules.txt", encoding="utf-8").read())
 
-    config, removed = build(sub, custom)
+    config, leaked = build(sub, custom)
     new = yaml.safe_dump(
         config,
         allow_unicode=True,
@@ -228,11 +254,13 @@ def main():
         )
         print("gist updated")
 
-    # 封禁列表整体失配说明订阅改过名，此时新配置里的 AI专用 可能又会选到被封节点。
-    # 配置已经同步出去了，但仍然要让 CI 红掉，否则会像上次一样悄悄坏掉。
-    if not removed:
+    # 剔除是按节点名做的，机场改名之后会漏；check_ai_group_clean() 按稳定的落地域名后缀
+    # 再查一遍，还查得到就说明封禁列表已经失配。配置此时已经同步出去了，但仍然要让 CI 红掉，
+    # 否则会像上次一样悄悄坏掉。
+    if leaked:
         print(
-            "::error::AI专用 一个已知被封的节点都没排除，请更新 AI_BLOCKED_NODES/AI_BLOCKED_SERVERS 后重跑",
+            f"::error::AI专用 里仍有命中封禁列表的落地节点：{leaked}；"
+            "机场可能改了节点名，请更新 AI_BLOCKED_NODES/AI_BLOCKED_SERVERS 后重跑",
             file=sys.stderr,
         )
         return 1
