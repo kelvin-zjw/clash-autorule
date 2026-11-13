@@ -11,3 +11,9 @@
 - DOMAIN-SUFFIX,aistudio.google.com,AI专用
 - DOMAIN-SUFFIX,ai.google.dev,AI专用
 - DOMAIN-SUFFIX,googleapis.com,AI专用
+# Antigravity：资格检查在服务端按「账号归属地 + 出口 IP」判定，出口落在支持地区才有戏。
+# 这两条原本只命中 DOMAIN-KEYWORD,google -> Ghelper -> 全球智能（url-test 一般选到延迟最低的
+# 香港节点），香港不在支持列表里，登录/onboarding 会被判 REGION_OUT_OF_SCOPE。指到 AI专用 的
+# 好处是该组已经剔除了被 Google 判为不支持地区的落地节点。
+- DOMAIN-SUFFIX,antigravity.google,AI专用
+- DOMAIN-SUFFIX,accounts.google.com,AI专用
